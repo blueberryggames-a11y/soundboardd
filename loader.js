@@ -1,97 +1,117 @@
-const spinnerElement = document.querySelector(".spinner");
-const containerElement = document.querySelector(".flex-container");
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
+
+// PASTE YOUR FIREBASE CONFIG HERE
+const firebaseConfig = {
+    apiKey: "AIzaSyB1XRR_Oi68prosRM6WUgcZA7hPzT-DmOk",
+    authDomain: "soundboard-ce3f9.firebaseapp.com",
+    projectId: "soundboard-ce3f9",
+    storageBucket: "soundboard-ce3f9.firebasestorage.app",
+    messagingSenderId: "554974413045",
+    appId: "1:554974413045:web:1a1489c5dd8bc2723bc5bc",
+    measurementId: "G-N7KQJQGCZ8"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const storage = getStorage(app);
 const audioElements = {};
-let hasLoaded = false;
 
-async function loadSoundboard() {
-  try {
-    // Cache bust the JSON file so we always get the newest sound list
-    const response = await fetch(`sounds.json?t=${Date.now()}`);
-    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-    
-    const data = await response.json();
-    
-    // Use a Document Fragment for performance. 
-    // This allows us to build all the buttons in memory and push them to the screen all at once.
-    const fragment = document.createDocumentFragment();
+// 1. Listen for Real-time Updates
+const soundGrid = document.getElementById("soundGrid");
 
-    data.sounds.forEach(sound => {
-      // 1. Preload audio in JS memory (No need to clutter the DOM with <audio> tags)
-      const audio = new Audio(sound.mp3);
-      audio.preload = "auto";
-      audioElements[sound.name] = audio;
-
-      // 2. Build the Sound Card
-      const soundElement = document.createElement("div");
-      soundElement.classList.add("sound");
-
-      // 3. Build the Button
-      const buttonElement = document.createElement("button");
-      buttonElement.classList.add("small-button");
-      buttonElement.style.backgroundColor = sound.color;
-
-      // CRITICAL UPGRADE: 'pointerdown' fires instantly on touch/click with zero delay.
-      buttonElement.addEventListener("pointerdown", (e) => {
-        e.preventDefault(); // Prevents ghost-clicks
-        const a = audioElements[sound.name];
-        a.currentTime = 0; // Reset to start instantly
-        
-        // Catch handles the error if browsers block audio before user interaction
-        a.play().catch(err => console.warn("Audio playback prevented:", err));
-      });
-
-      // 4. Build the Label
-      const nameElement = document.createElement("p");
-      nameElement.classList.add("name");
-      nameElement.innerText = sound.name;
-
-      // 5. Assemble
-      soundElement.appendChild(buttonElement);
-      soundElement.appendChild(nameElement);
-      fragment.appendChild(soundElement);
+onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
+    soundGrid.innerHTML = ""; // Clear grid
+    snapshot.forEach((doc) => {
+        renderSound(doc.data());
     });
+    document.querySelector(".spinner")?.remove();
+});
 
-    // Push everything to the screen at once
-    containerElement.appendChild(fragment);
-    spinnerElement?.remove();
-    hasLoaded = true;
-    console.log(`${data.sounds.length} sounds loaded!`);
+function renderSound(data) {
+    const card = document.createElement("div");
+    card.className = "sound";
+    
+    const btn = document.createElement("button");
+    btn.className = "small-button";
+    btn.style.backgroundColor = data.color || "#6366f1";
+    
+    const audio = new Audio(data.url);
+    audio.preload = "auto";
+    audioElements[data.name] = audio;
 
-  } catch (error) {
-    displayError(`Error loading soundboard: ${error.message}`);
-  }
+    // Instant Response using pointerdown
+    btn.addEventListener("pointerdown", () => {
+        audio.currentTime = 0;
+        audio.play();
+        card.classList.add("playing");
+    });
+    
+    audio.onended = () => card.classList.remove("playing");
+
+    const name = document.createElement("p");
+    name.className = "name";
+    name.innerText = data.name;
+
+    card.appendChild(btn);
+    card.appendChild(name);
+    soundGrid.appendChild(card);
 }
 
-// Reusable error display
-function displayError(message) {
-  const errorMessageElement = document.createElement("h3");
-  errorMessageElement.style.color = "#ef4444";
-  errorMessageElement.innerText = message;
-  containerElement.appendChild(errorMessageElement);
-  spinnerElement?.remove();
-}
+// 2. Upload Logic
+const fileInput = document.getElementById("audioFile");
+const nameInput = document.getElementById("soundName");
+const submitBtn = document.getElementById("submitUpload");
+const fileStatus = document.getElementById("fileStatus");
 
-// Timeout fallback
-setTimeout(() => {
-  if (!hasLoaded) {
-    displayError("An unknown error occurred while trying to load the soundboard.");
-  }
-}, 7000);
+fileInput.onchange = () => {
+    if (fileInput.files[0]) fileStatus.innerText = "Selected: " + fileInput.files[0].name;
+};
 
-// Global Audio Controls
-function playAll() {
-  Object.values(audioElements).forEach(audio => {
-    audio.currentTime = 0;
-    audio.play().catch(() => {});
-  });
-}
+submitBtn.onclick = async () => {
+    const file = fileInput.files[0];
+    if (!file) return alert("Please select an MP3 first!");
 
-function stopAll() {
-  Object.values(audioElements).forEach(audio => {
-    audio.pause();
-    audio.currentTime = 0;
-  });
-}
+    submitBtn.disabled = true;
+    submitBtn.innerText = "Uploading...";
 
-// Initialize
-loadSoundboard();
+    try {
+        // Auto-name logic
+        const finalName = nameInput.value || file.name.replace(".mp3", "");
+        
+        // Upload to Storage
+        const fileRef = ref(storage, `sounds/${Date.now()}_${file.name}`);
+        const uploadResult = await uploadBytes(fileRef, file);
+        const url = await getDownloadURL(uploadResult.ref);
+
+        // Save to Database (triggers sync for everyone)
+        await addDoc(collection(db, "sounds"), {
+            name: finalName,
+            url: url,
+            color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+            createdAt: serverTimestamp()
+        });
+
+        // Reset
+        nameInput.value = "";
+        fileInput.value = "";
+        fileStatus.innerText = "Drop .mp3 here or click to browse";
+        document.getElementById("uploadForm").classList.add("hidden");
+    } catch (e) {
+        console.error(e);
+        alert("Upload failed. Check console.");
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerText = "Upload & Sync";
+    }
+};
+
+// Toggle UI
+document.getElementById("toggleUpload").onclick = () => {
+    document.getElementById("uploadForm").classList.toggle("hidden");
+};
+
+// Global Controls
+window.playAll = () => Object.values(audioElements).forEach(a => { a.currentTime = 0; a.play(); });
+window.stopAll = () => Object.values(audioElements).forEach(a => { a.pause(); a.currentTime = 0; });
