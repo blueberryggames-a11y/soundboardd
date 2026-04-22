@@ -2,10 +2,10 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebas
 import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
+    apiKey: "AIzaSyB1XRR_Oi68prosRM6WUgcZA7hPzT-DmOk",
     authDomain: "soundboard-ce3f9.firebaseapp.com",
     projectId: "soundboard-ce3f9",
-    appId: "YOUR_APP_ID"
+    appId: "1:554974413045:web:1a1489c5dd8bc2723bc5bc"
 };
 
 const app = initializeApp(firebaseConfig);
