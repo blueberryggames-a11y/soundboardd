@@ -3,42 +3,85 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Live Soundboard (No Storage)</title>
+    <title>Live Cloud Soundboard</title>
+    
+    <!-- Google Fonts for a modern look -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&display=swap" rel="stylesheet">
+    
+    <!-- Stylesheets -->
     <link rel="stylesheet" href="css/styles.css" />
     <link rel="stylesheet" href="css/spinner.css" />
+    
+    <!-- PWA and Favicons -->
+    <link rel="icon" href="img/mlg-favicon.png" />
     <link rel="manifest" href="./manifest.json" />
+
+    <script>
+        // Register Service Worker for offline support
+        if ("serviceWorker" in navigator) {
+            window.addEventListener("load", () => {
+                navigator.serviceWorker.register("/sw.js")
+                    .then(reg => console.log("SW Registered"))
+                    .catch(err => console.log("SW Failed", err));
+            });
+        }
+    </script>
 </head>
 <body>
 
     <header class="hero">
         <h1>Live Soundboard</h1>
-        <p class="subtitle">Synced via Cloud Firestore</p>
+        <p class="subtitle">Cloud-synced sounds for everyone.</p>
         
         <div class="upload-container">
-            <button id="toggleUpload" class="btn-main">＋ Add New Sound</button>
+            <div class="header-buttons">
+                <button id="toggleUpload" class="btn-main">＋ Add One</button>
+                <button id="bulkSyncBtn" class="btn-main secondary">📁 Bulk Sync Folder</button>
+            </div>
+
+            <!-- Hidden Folder Input for Bulk Sync -->
+            <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+            
+            <!-- Manual Upload Form (Toggled) -->
             <div id="uploadForm" class="upload-card hidden">
-                <label for="audioFile" class="file-drop">
-                    <span id="fileStatus">Select MP3 (Max 700KB)</span>
-                    <input type="file" id="audioFile" accept="audio/mpeg" hidden>
-                </label>
-                <input type="text" id="soundName" placeholder="Sound Name">
-                <button id="submitUpload" class="btn-submit">Upload to Cloud</button>
+                <h3>New Audio Upload</h3>
+                <div class="form-group">
+                    <label for="audioFile" class="file-drop">
+                        <span id="fileStatus">Click to select MP3 (Max 700KB)</span>
+                        <input type="file" id="audioFile" accept="audio/mpeg" hidden>
+                    </label>
+                </div>
+                <input type="text" id="soundName" placeholder="Sound Name (Optional)">
+                <button id="submitUpload" class="btn-submit">Sync to Cloud</button>
             </div>
         </div>
     </header>
 
     <main class="soundboard-container">
+        <!-- Loader.js will populate this grid -->
         <div class="flex-container" id="soundGrid">
             <div class="spinner"></div>
         </div>
     </main>
 
+    <!-- Fixed Bottom Controls -->
     <div class="control-dock">
-        <button class="btn-dock chaos" onclick="playAll()">Chaos</button>
-        <button class="btn-dock stop" onclick="stopAll()">Stop</button>
+        <div class="dock-content">
+            <span class="dock-info">Audio Controls</span>
+            <div class="dock-btns">
+                <button class="btn-dock chaos" onclick="playAll()">Chaos</button>
+                <button class="btn-dock stop" onclick="stopAll()">Stop All</button>
+            </div>
+        </div>
     </div>
 
+    <footer id="footer">
+        <p>3kh0 © 2026 • Firebase Real-time Engine</p>
+    </footer>
+
+    <!-- Firebase Logic and Sound Rendering -->
     <script type="module" src="loader.js"></script>
 </body>
 </html>
