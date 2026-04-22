@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
+// --- 1. FIREBASE CONFIG ---
 const firebaseConfig = {
     apiKey: "AIzaSyB1XRR_Oi68prosRM6WUgcZA7hPzT-DmOk",
     authDomain: "soundboard-ce3f9.firebaseapp.com",
@@ -12,28 +13,28 @@ const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const audioElements = {};
 
-// --- 1. THE AI-STYLE NAME CLEANER ---
+// --- 2. THE IMPROVED NAME CLEANER (6-WORD LIMIT) ---
 function cleanFileName(rawName) {
     let name = rawName.replace(".mp3", "");
 
-    // Remove YouTube IDs (e.g., _6bXEr...) and random tmp strings
+    // Remove YouTube IDs, tmp strings, and random numbers/parentheses
     name = name.replace(/(_[a-zA-Z0-9]{11}|tmp_\d+|copy|[\(\)\d])/gi, "");
     
     // Replace underscores, dashes, and dots with spaces
     name = name.replace(/[_\-\.]+/g, " ").trim();
     
     // Capitalize Words
-    name = name.split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+    let words = name.split(" ").filter(w => w.length > 0).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
 
-    // Final Trim: If it's still way too long, cut it at 25 chars
-    if (name.length > 25) {
-        name = name.substring(0, 22) + "...";
+    // CRITICAL FIX: Trim to max 5 words
+    if (words.length > 5) {
+        return words.slice(0, 6).join(" ") + "...";
     }
 
-    return name || "Unknown Sound";
+    return words.join(" ") || "Unknown Sound";
 }
 
-// --- 2. REAL-TIME UI SYNC ---
+// --- 3. REAL-TIME UI SYNC ---
 const soundGrid = document.getElementById("soundGrid");
 
 onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
@@ -57,6 +58,7 @@ function renderSound(data) {
     audio.preload = "auto";
     audioElements[data.name] = audio;
 
+    // Toggle Logic: Play if stopped, Stop if playing
     btn.addEventListener("pointerdown", (e) => {
         e.preventDefault();
         if (!audio.paused) {
@@ -64,13 +66,18 @@ function renderSound(data) {
             audio.currentTime = 0;
             card.classList.remove("playing");
         } else {
-            stopAll(); // Ensures only one pulses at a time
+            stopAll(); // Stops others so only one pulses
             audio.play().catch(() => {});
             card.classList.add("playing");
         }
     });
     
-    audio.addEventListener("ended", () => card.classList.remove("playing"));
+    // Auto-remove animation when sound ends
+    audio.addEventListener("ended", () => {
+        card.classList.remove("playing");
+        audio.currentTime = 0;
+    });
+    
     audio.addEventListener("pause", () => card.classList.remove("playing"));
 
     const name = document.createElement("p");
@@ -82,7 +89,7 @@ function renderSound(data) {
     soundGrid.appendChild(card);
 }
 
-// --- 3. BULK SYNC ENGINE (With Auto-Cleaning) ---
+// --- 4. BULK SYNC ENGINE ---
 const folderInput = document.getElementById("folderInput");
 const bulkSyncBtn = document.getElementById("bulkSyncBtn");
 
@@ -93,7 +100,7 @@ folderInput.onchange = async (e) => {
     if (files.length === 0) return;
 
     bulkSyncBtn.disabled = true;
-    bulkSyncBtn.innerText = "Scanning...";
+    bulkSyncBtn.innerText = "Cleaning Names...";
 
     const querySnapshot = await getDocs(collection(db, "sounds"));
     const existingNames = querySnapshot.docs.map(doc => doc.data().name);
@@ -103,10 +110,11 @@ folderInput.onchange = async (e) => {
     for (const file of files) {
         const cleanedName = cleanFileName(file.name);
 
+        // Check for duplicates or size limits
         if (existingNames.includes(cleanedName) || file.size > 720000) continue;
 
         try {
-            bulkSyncBtn.innerText = `Cleaning & Syncing...`;
+            bulkSyncBtn.innerText = `Syncing: ${cleanedName}`;
             const base64 = await blobToBase64(file);
             
             await addDoc(collection(db, "sounds"), {
@@ -121,16 +129,16 @@ folderInput.onchange = async (e) => {
 
     bulkSyncBtn.disabled = false;
     bulkSyncBtn.innerText = "📁 Bulk Sync Folder";
-    alert(`Added ${uploadCount} sounds with cleaned names!`);
+    alert(`Added ${uploadCount} sounds. All names trimmed to max 6 words.`);
 };
 
-// --- MANUAL UPLOAD LOGIC ---
+// --- 5. INDIVIDUAL UPLOAD ---
 const manualFileInput = document.getElementById("audioFile");
 const submitBtn = document.getElementById("submitUpload");
 
 submitBtn.onclick = async () => {
     const file = manualFileInput.files[0];
-    if (!file || file.size > 720000) return alert("File too large!");
+    if (!file || file.size > 720000) return alert("File missing or too large!");
 
     submitBtn.disabled = true;
     const base64 = await blobToBase64(file);
