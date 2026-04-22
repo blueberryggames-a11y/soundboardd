@@ -3,36 +3,27 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Live Soundboard</title>
-    <!-- Google Fonts -->
+    <title>Live Soundboard (No Storage)</title>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/styles.css" />
     <link rel="stylesheet" href="css/spinner.css" />
     <link rel="manifest" href="./manifest.json" />
-    <script>
-        if ("serviceWorker" in navigator) {
-            navigator.serviceWorker.register("/sw.js");
-        }
-    </script>
 </head>
 <body>
 
     <header class="hero">
         <h1>Live Soundboard</h1>
-        <p class="subtitle">Click to play. Upload to share with the world.</p>
+        <p class="subtitle">Synced via Cloud Firestore</p>
         
         <div class="upload-container">
-            <button id="toggleUpload" class="btn-main">＋ Share a Sound</button>
-            
+            <button id="toggleUpload" class="btn-main">＋ Add New Sound</button>
             <div id="uploadForm" class="upload-card hidden">
-                <div class="form-group">
-                    <label for="audioFile" class="file-drop">
-                        <span id="fileStatus">Drop .mp3 here or click to browse</span>
-                        <input type="file" id="audioFile" accept="audio/mpeg" hidden>
-                    </label>
-                </div>
-                <input type="text" id="soundName" placeholder="Sound Name (Optional)">
-                <button id="submitUpload" class="btn-submit">Upload & Sync</button>
+                <label for="audioFile" class="file-drop">
+                    <span id="fileStatus">Select MP3 (Max 700KB)</span>
+                    <input type="file" id="audioFile" accept="audio/mpeg" hidden>
+                </label>
+                <input type="text" id="soundName" placeholder="Sound Name">
+                <button id="submitUpload" class="btn-submit">Upload to Cloud</button>
             </div>
         </div>
     </header>
@@ -44,14 +35,10 @@
     </main>
 
     <div class="control-dock">
-        <span class="dock-label">Controls</span>
         <button class="btn-dock chaos" onclick="playAll()">Chaos</button>
         <button class="btn-dock stop" onclick="stopAll()">Stop</button>
     </div>
 
-    <p id="footer">3kh0 © 2026 • Real-time Sync Enabled</p>
-
-    <!-- Firebase SDKs -->
     <script type="module" src="loader.js"></script>
 </body>
 </html>
