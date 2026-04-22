@@ -1,2 +1,33 @@
-/* Unminify the code here: https://unminify.com/ */
-.spinner {margin: 50px auto;width: 50px;height: 50px;border: 5px solid rgba(255, 255, 255, 0.3);border-top-color: #0066cc;border-radius: 50%;animation: spin 1s ease-in-out infinite;}@keyframes spin {to {transform: rotate(360deg);}}
+.flex-container {
+  /* Ensuring the container has enough height to show the spinner clearly */
+  min-height: 200px;
+  position: relative;
+}
+
+.spinner {
+  width: 60px;
+  height: 60px;
+  margin: 50px auto;
+  border-radius: 50%;
+  
+  /* Create a modern gradient "track" */
+  background: radial-gradient(farthest-side, #6366f1 94%, #0000) top/6px 6px no-repeat,
+              conic-gradient(#0000 30%, #6366f1);
+  
+  /* This mask creates the "hollow" circle look */
+  -webkit-mask: radial-gradient(farthest-side, #0000 calc(100% - 6px), #000 0);
+  mask: radial-gradient(farthest-side, #0000 calc(100% - 6px), #000 0);
+  
+  /* Add a subtle glow to make it pop against the dark UI */
+  filter: drop-shadow(0 0 10px rgba(99, 102, 241, 0.4));
+  
+  /* Use a more sophisticated ease-in-out or linear spin */
+  animation: spin 0.8s infinite linear;
+}
+
+/* Keyframes for a smooth 360-degree rotation */
+@keyframes spin {
+  100% {
+    transform: rotate(1turn);
+  }
+}
