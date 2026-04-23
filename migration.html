@@ -13,186 +13,348 @@
     min-height: 100vh;
   }
   h1 { color: #6366f1; margin-bottom: 8px; font-size: 1.4rem; }
-  p.sub { color: #666; margin-bottom: 32px; font-size: 0.85rem; }
-  #startBtn {
-    background: #6366f1;
-    color: white;
+  p.sub { color: #666; margin-bottom: 28px; font-size: 0.85rem; line-height: 1.6; }
+  .btns { display: flex; gap: 12px; margin-bottom: 28px; flex-wrap: wrap; }
+  button {
     border: none;
-    padding: 12px 28px;
+    padding: 11px 24px;
     border-radius: 8px;
-    font-size: 1rem;
+    font-size: 0.95rem;
     font-family: monospace;
     cursor: pointer;
-    margin-bottom: 32px;
     transition: opacity 0.2s;
   }
-  #startBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #startBtn  { background: #6366f1; color: #fff; }
+  #pauseBtn  { background: #334155; color: #e0e0e0; }
+  #resetBtn  { background: #1e1e1e; color: #f87171; border: 1px solid #f87171; }
+
+  #stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-label { font-size: 0.72rem; color: #555; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .08em; }
+  .stat-value { font-size: 1.5rem; font-weight: bold; color: #e0e0e0; }
+  #statDone .stat-value { color: #4ade80; }
+  #statFail .stat-value { color: #f87171; }
+  #statSkip .stat-value { color: #facc15; }
+  #statLeft .stat-value { color: #94a3b8; }
+
+  .bar-wrap {
+    background: #1a1a1a;
+    border-radius: 99px;
+    height: 8px;
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+  #bar { height: 100%; width: 0%; background: #6366f1; border-radius: 99px; transition: width 0.4s; }
+  #eta { font-size: 0.78rem; color: #555; margin-bottom: 20px; }
+
   #log {
     background: #1a1a1a;
     border: 1px solid #2a2a2a;
     border-radius: 10px;
-    padding: 20px;
-    max-height: 60vh;
+    padding: 16px 20px;
+    height: 340px;
     overflow-y: auto;
-    font-size: 0.82rem;
-    line-height: 1.7;
+    font-size: 0.78rem;
+    line-height: 1.75;
   }
   .ok   { color: #4ade80; }
   .err  { color: #f87171; }
   .skip { color: #facc15; }
   .info { color: #94a3b8; }
-  .done { color: #6366f1; font-weight: bold; font-size: 1rem; margin-top: 8px; }
-  #progress {
-    margin-bottom: 16px;
-    font-size: 0.85rem;
-    color: #94a3b8;
-  }
-  .bar-wrap {
-    background: #1a1a1a;
-    border-radius: 99px;
-    height: 6px;
-    margin-bottom: 24px;
-    overflow: hidden;
-  }
-  #bar {
-    height: 100%;
-    width: 0%;
-    background: #6366f1;
-    border-radius: 99px;
-    transition: width 0.3s;
-  }
+  .done { color: #6366f1; font-weight: bold; }
+  .sep  { color: #333; }
 </style>
 </head>
 <body>
 
 <h1>🔄 Base64 → Storage Migration</h1>
-<p class="sub">Reads every Firestore sound with base64 data, uploads it to Firebase Storage, saves the URL, and cleans up the old field. Run once.</p>
+<p class="sub">
+  Fetches 50 sounds at a time — never loads all 2,000 at once.<br>
+  Already-migrated sounds are skipped. Close the tab anytime and reopen to resume.
+</p>
 
-<button id="startBtn">Start Migration</button>
+<div class="btns">
+  <button id="startBtn">▶ Start</button>
+  <button id="pauseBtn" disabled>⏸ Pause</button>
+  <button id="resetBtn">↺ Reset Progress</button>
+</div>
 
-<div id="progress">Waiting to start...</div>
+<div id="stats">
+  <div class="stat" id="statDone"><div class="stat-label">Migrated</div><div class="stat-value" id="vDone">0</div></div>
+  <div class="stat" id="statSkip"><div class="stat-label">Already done</div><div class="stat-value" id="vSkip">0</div></div>
+  <div class="stat" id="statFail"><div class="stat-label">Failed</div><div class="stat-value" id="vFail">0</div></div>
+  <div class="stat" id="statLeft"><div class="stat-label">Processed</div><div class="stat-value" id="vLeft">0</div></div>
+</div>
+
 <div class="bar-wrap"><div id="bar"></div></div>
+<div id="eta">Waiting to start…</div>
 <div id="log"></div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import {
-    getFirestore, collection, getDocs, updateDoc, doc, deleteField
+    getFirestore, collection, getDocs, updateDoc, doc,
+    deleteField, query, orderBy, limit, startAfter, getDoc
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import {
-    getStorage, ref as storageRef, uploadBytes, getDownloadURL
+    getStorage, ref as sRef, uploadBytes, getDownloadURL
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
-// ── PASTE YOUR CONFIG HERE ──────────────────────────────────────────────────
+// ── YOUR CONFIG ──────────────────────────────────────────────────────────────
 const firebaseConfig = {
     apiKey: "AIzaSyBa2orhKFThmsjBYcnIoM1iml2xNhOmjh8",
     authDomain: "newsound-15fa5.firebaseapp.com",
     projectId: "newsound-15fa5",
     databaseURL: "https://newsound-15fa5-default-rtdb.firebaseio.com",
-    storageBucket: "newsound-15fa5.appspot.com",  // ← make sure this is correct
+    storageBucket: "newsound-15fa5.appspot.com",
     appId: "1:29777437103:web:f038577254c76c38168f5a"
 };
-// ───────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
-const app  = initializeApp(firebaseConfig);
-const db   = getFirestore(app);
+const BATCH_SIZE      = 50;   // Docs per Firestore page — safe for memory
+const DELAY_PER_SOUND = 500;  // ms between each upload (avoids Storage rate limits)
+const DELAY_PER_BATCH = 3000; // ms rest between batches (lets Firebase breathe)
+const RESUME_KEY      = "migration_cursor_id"; // localStorage key for resume
+
+const app     = initializeApp(firebaseConfig);
+const db      = getFirestore(app);
 const storage = getStorage(app);
 
-const logEl  = document.getElementById("log");
-const bar    = document.getElementById("bar");
-const progEl = document.getElementById("progress");
+let paused  = false;
+let running = false;
+let counts  = { done: 0, skip: 0, fail: 0, total: 0 };
+let startTime = null;
+
+// ── DOM ───────────────────────────────────────────────────────────────────────
+const logEl    = document.getElementById("log");
+const barEl    = document.getElementById("bar");
+const etaEl    = document.getElementById("eta");
+const startBtn = document.getElementById("startBtn");
+const pauseBtn = document.getElementById("pauseBtn");
+const resetBtn = document.getElementById("resetBtn");
 
 function log(msg, type = "info") {
     const line = document.createElement("div");
     line.className = type;
     line.textContent = msg;
     logEl.appendChild(line);
-    logEl.scrollTop = logEl.scrollHeight;
+    const nearBottom = logEl.scrollHeight - logEl.scrollTop < logEl.clientHeight + 100;
+    if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
 }
 
-function setProgress(done, total) {
-    const pct = total ? Math.round((done / total) * 100) : 0;
-    bar.style.width = pct + "%";
-    progEl.textContent = `${done} / ${total} processed (${pct}%)`;
+function updateUI() {
+    document.getElementById("vDone").textContent = counts.done;
+    document.getElementById("vSkip").textContent = counts.skip;
+    document.getElementById("vFail").textContent = counts.fail;
+    const processed = counts.done + counts.skip + counts.fail;
+    document.getElementById("vLeft").textContent = processed;
+
+    if (counts.total > 0) {
+        barEl.style.width = Math.min(100, Math.round((processed / counts.total) * 100)) + "%";
+    }
+
+    if (startTime && counts.done > 0) {
+        const elapsed   = (Date.now() - startTime) / 1000;
+        const rate      = counts.done / elapsed;
+        const remaining = counts.total > 0
+            ? Math.max(0, (counts.total - processed)) / rate
+            : null;
+        etaEl.textContent = remaining !== null
+            ? `~${Math.round(remaining / 60)} min remaining  ·  ${rate.toFixed(2)} sounds/sec`
+            : `${rate.toFixed(2)} sounds/sec`;
+    }
 }
 
-// Converts a base64 data-URL string → Blob
-function base64ToBlob(base64String) {
-    const [header, data] = base64String.split(",");
-    const mime = header.match(/:(.*?);/)?.[1] || "audio/mpeg";
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function checkPause() {
+    while (paused) await sleep(500);
+}
+
+function base64ToBlob(b64) {
+    const [header, data] = b64.split(",");
+    const mime   = header.match(/:(.*?);/)?.[1] || "audio/mpeg";
     const binary = atob(data);
-    const bytes = new Uint8Array(binary.length);
+    const bytes  = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return new Blob([bytes], { type: mime });
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
+// ── MIGRATION ─────────────────────────────────────────────────────────────────
 async function migrate() {
-    const btn = document.getElementById("startBtn");
-    btn.disabled = true;
-    log("Fetching all sounds from Firestore...", "info");
+    running   = true;
+    startTime = Date.now();
+    startBtn.disabled = true;
+    pauseBtn.disabled = false;
 
-    const snap = await getDocs(collection(db, "sounds"));
-    const all  = snap.docs;
-    const toMigrate = all.filter(d => d.data().audioData && !d.data().url);
+    let cursor   = null; // Firestore doc snapshot used as pagination cursor
+    let batchNum = 0;
 
-    log(`Found ${all.length} total sounds. ${toMigrate.length} need migration, ${all.length - toMigrate.length} already have a URL.`, "info");
-
-    if (toMigrate.length === 0) {
-        log("✅ Nothing to migrate! All sounds already use Storage URLs.", "done");
-        setProgress(0, 0);
-        progEl.textContent = "Already done — nothing to migrate.";
-        return;
+    // --- Resume: if we have a saved doc ID, find its snapshot to use as cursor ---
+    const savedId = localStorage.getItem(RESUME_KEY);
+    if (savedId) {
+        try {
+            log(`Resuming from saved position (doc: ${savedId})…`, "skip");
+            const savedSnap = await getDoc(doc(db, "sounds", savedId));
+            if (savedSnap.exists()) {
+                cursor = savedSnap;
+                log("Resume cursor loaded. Skipping already-processed sounds.", "skip");
+            } else {
+                log("Saved cursor not found — starting from beginning.", "info");
+            }
+        } catch (e) {
+            log(`Could not load resume cursor: ${e.message} — starting fresh.`, "err");
+        }
     }
 
-    let done = 0, failed = 0;
-    setProgress(0, toMigrate.length);
+    // --- Paginate through ALL sounds, 50 at a time ---
+    while (true) {
+        await checkPause();
 
-    for (const docSnap of toMigrate) {
-        const data = docSnap.data();
-        const label = `"${data.name || docSnap.id}"`;
+        batchNum++;
+        log(`── Batch ${batchNum} ──────────────────────────────`, "sep");
 
+        let batchSnap;
         try {
-            // 1. Convert base64 → Blob
-            const blob = base64ToBlob(data.audioData);
+            const q = cursor
+                ? query(collection(db, "sounds"), orderBy("createdAt", "desc"), startAfter(cursor), limit(BATCH_SIZE))
+                : query(collection(db, "sounds"), orderBy("createdAt", "desc"), limit(BATCH_SIZE));
 
-            // 2. Upload to Firebase Storage
-            const fileRef = storageRef(storage, `sounds/${docSnap.id}.mp3`);
-            const uploadSnap = await uploadBytes(fileRef, blob);
-
-            // 3. Get public download URL
-            const url = await getDownloadURL(uploadSnap.ref);
-
-            // 4. Update Firestore: add `url`, remove `audioData`
-            await updateDoc(doc(db, "sounds", docSnap.id), {
-                url,
-                audioData: deleteField()   // ← removes the giant base64 field
-            });
-
-            done++;
-            log(`✓ Migrated ${label}`, "ok");
-
+            batchSnap = await getDocs(q);
         } catch (err) {
-            failed++;
-            log(`✗ Failed ${label}: ${err.message}`, "err");
+            log(`Firestore fetch failed: ${err.message}`, "err");
+            log("Waiting 8s before retrying…", "info");
+            await sleep(8000);
+            continue; // Retry same batch
         }
 
-        setProgress(done + failed, toMigrate.length);
-        await sleep(150); // Small delay to avoid hammering Storage
+        if (batchSnap.empty) {
+            log("No more documents — migration complete!", "done");
+            break;
+        }
+
+        // Update estimated total (keeps growing as we page through)
+        counts.total = Math.max(counts.total, counts.done + counts.skip + counts.fail + batchSnap.size);
+
+        // Process each doc one at a time — no parallel uploads
+        for (const docSnap of batchSnap.docs) {
+            await checkPause();
+
+            const data  = docSnap.data();
+            const label = data.name || docSnap.id;
+
+            // Already has a URL and no leftover base64 → skip
+            if (data.url && !data.audioData) {
+                counts.skip++;
+                updateUI();
+                continue;
+            }
+
+            // Nothing to migrate
+            if (!data.audioData) {
+                log(`⚠ "${label}" — no audioData field, skipping`, "skip");
+                counts.skip++;
+                updateUI();
+                continue;
+            }
+
+            let success = false;
+
+            // Two attempts per sound
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                try {
+                    const blob    = base64ToBlob(data.audioData);
+                    const fileRef = sRef(storage, `sounds/${docSnap.id}.mp3`);
+                    const snap    = await uploadBytes(fileRef, blob);
+                    const url     = await getDownloadURL(snap.ref);
+
+                    await updateDoc(doc(db, "sounds", docSnap.id), {
+                        url,
+                        audioData: deleteField()
+                    });
+
+                    counts.done++;
+                    log(`✓ "${label}"`, "ok");
+                    success = true;
+                    break;
+
+                } catch (err) {
+                    if (attempt === 1) {
+                        log(`  Attempt 1 failed for "${label}" — retrying in 3s…`, "err");
+                        await sleep(3000);
+                    } else {
+                        log(`✗ "${label}": ${err.message}`, "err");
+                        counts.fail++;
+                    }
+                }
+            }
+
+            // Save cursor after each sound so we can resume precisely
+            localStorage.setItem(RESUME_KEY, docSnap.id);
+            updateUI();
+
+            if (success) await sleep(DELAY_PER_SOUND);
+        }
+
+        // Move the Firestore cursor to the last doc in this batch
+        cursor = batchSnap.docs[batchSnap.docs.length - 1];
+
+        // Rest between batches to avoid Firebase rate limits
+        if (batchSnap.size === BATCH_SIZE) {
+            log(`Batch ${batchNum} done. Resting ${DELAY_PER_BATCH / 1000}s…`, "info");
+            await sleep(DELAY_PER_BATCH);
+        }
     }
 
-    log("─".repeat(48), "info");
-    log(`Migration complete. ✓ ${done} succeeded   ✗ ${failed} failed`, "done");
+    // ── FINISHED ──────────────────────────────────────────────────────────────
+    localStorage.removeItem(RESUME_KEY);
+    running = false;
+    pauseBtn.disabled = true;
+    barEl.style.width = "100%";
+    etaEl.textContent = "Done!";
 
-    if (failed === 0) {
-        log("All base64 data has been removed. Your app is now fully on Firebase Storage.", "done");
+    log("═══════════════════════════════════════════════════", "sep");
+    log(`Finished: ✓ ${counts.done} migrated  ⚠ ${counts.skip} skipped  ✗ ${counts.fail} failed`, "done");
+
+    if (counts.fail > 0) {
+        log(`Reopen this page to retry the ${counts.fail} that failed — everything else will be skipped.`, "err");
     } else {
-        log(`${failed} sounds failed — scroll up to see which ones. You can run this page again to retry them.`, "err");
+        log("Your app is fully on Firebase Storage. Safe to close this tab.", "done");
     }
 }
 
-document.getElementById("startBtn").onclick = migrate;
+// ── BUTTONS ───────────────────────────────────────────────────────────────────
+startBtn.onclick = () => { if (!running) migrate(); };
+
+pauseBtn.onclick = () => {
+    paused = !paused;
+    pauseBtn.textContent = paused ? "▶ Resume" : "⏸ Pause";
+    log(paused ? "⏸ Paused." : "▶ Resumed.", "info");
+};
+
+resetBtn.onclick = () => {
+    if (running) return alert("Pause first, then reset.");
+    localStorage.removeItem(RESUME_KEY);
+    counts = { done: 0, skip: 0, fail: 0, total: 0 };
+    logEl.innerHTML = "";
+    barEl.style.width = "0%";
+    etaEl.textContent = "Reset. Click Start to begin fresh.";
+    startBtn.disabled = false;
+    updateUI();
+    log("Progress cleared — ready to start.", "info");
+};
 </script>
 </body>
 </html>
