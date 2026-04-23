@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { getDatabase, ref, onValue, set, onDisconnect, push } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
 // --- CONFIG ---
@@ -18,17 +18,19 @@ const audioCache = {};
 
 // --- 1. LIVE USER COUNTER ---
 const userCountElem = document.getElementById("userCount");
-onValue(ref(rtdb, 'presence/'), (snap) => {
-    userCountElem.innerText = snap.numChildren() || 1;
-});
+if (userCountElem) {
+    onValue(ref(rtdb, 'presence/'), (snap) => {
+        userCountElem.innerText = snap.numChildren() || 1;
+    });
 
-const myPresenceRef = push(ref(rtdb, 'presence/'));
-onValue(ref(rtdb, '.info/connected'), (snap) => {
-    if (snap.val()) {
-        set(myPresenceRef, { online: true });
-        onDisconnect(myPresenceRef).remove();
-    }
-});
+    const myPresenceRef = push(ref(rtdb, 'presence/'));
+    onValue(ref(rtdb, '.info/connected'), (snap) => {
+        if (snap.val()) {
+            set(myPresenceRef, { online: true });
+            onDisconnect(myPresenceRef).remove();
+        }
+    });
+}
 
 // --- 2. UTILITIES ---
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
@@ -50,7 +52,6 @@ function blobToBase64(blob) {
 
 // --- 3. UI RENDERING ---
 const soundGrid = document.getElementById("soundGrid");
-
 onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
     document.querySelector(".spinner")?.remove();
     snapshot.docChanges().forEach((change) => {
@@ -77,7 +78,6 @@ function renderSound(id, data) {
             await sleep(50);
             card.classList.remove("loading-audio");
         }
-
         const audio = audioCache[id];
         if (!audio.paused) {
             audio.pause();
@@ -97,17 +97,52 @@ function renderSound(id, data) {
     soundGrid.appendChild(card);
 }
 
-// --- 4. UPLOAD LOGIC & FIXES ---
+// --- 4. THE FIX: BULK UPLOAD TRIGGERING ---
 
-// TRIGGER: This makes the visible button open the hidden folder input
-document.getElementById("bulkSyncBtn").onclick = () => {
-    document.getElementById("folderInput").click();
+const bulkBtn = document.getElementById("bulkSyncBtn");
+const folderInput = document.getElementById("folderInput");
+
+// 1. Force the hidden input to open when the button is clicked
+if (bulkBtn && folderInput) {
+    bulkBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        folderInput.click();
+    });
+}
+
+// 2. Handle the file processing after folder selection
+folderInput.onchange = async (e) => {
+    const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
+    
+    if (files.length === 0) {
+        alert("No MP3 files found in that folder.");
+        return;
+    }
+
+    if (files.length > 30 && !confirm(`Upload ${files.length} sounds? This may take a moment.`)) {
+        e.target.value = "";
+        return;
+    }
+
+    bulkBtn.disabled = true;
+    let count = 0;
+
+    for (const file of files) {
+        count++;
+        bulkBtn.innerText = `Syncing ${count}/${files.length}...`;
+        await uploadToFirebase(file);
+    }
+
+    bulkBtn.disabled = false;
+    bulkBtn.innerText = "📁 Bulk Sync Folder";
+    e.target.value = ""; // Reset so you can select the same folder again
 };
 
+// --- 5. UPLOAD CORE ---
 async function uploadToFirebase(file, customName = null) {
     const name = customName || cleanFileName(file.name);
-    if (file.size > 720000) {
-        console.warn(`[Skipped] ${name}: Over 700KB.`);
+    if (file.size > 750000) { // Slightly increased tolerance
+        console.warn(`[Skipped] ${name}: Over limit.`);
         return false;
     }
 
@@ -119,32 +154,13 @@ async function uploadToFirebase(file, customName = null) {
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-        await sleep(500); // Anti-lag delay
+        await sleep(600); // Increased delay for safety
         return true;
-    } catch (error) {
-        console.error(`Error uploading ${name}:`, error);
+    } catch (err) {
+        console.error("Upload error:", err);
         return false;
     }
 }
-
-// Bulk Sync Handler
-document.getElementById("folderInput").onchange = async (e) => {
-    const files = Array.from(e.target.files).filter(f => f.name.endsWith(".mp3"));
-    const btn = document.getElementById("bulkSyncBtn");
-    
-    if (files.length === 0) return;
-    if (files.length > 50 && !confirm(`Sync ${files.length} sounds?`)) return;
-
-    btn.disabled = true;
-    for (let i = 0; i < files.length; i++) {
-        btn.innerText = `Syncing ${i + 1}/${files.length}...`;
-        await uploadToFirebase(files[i]);
-    }
-
-    btn.disabled = false;
-    btn.innerText = "📁 Bulk Sync Folder";
-    e.target.value = ""; 
-};
 
 // Single Upload Handler
 document.getElementById("submitUpload").onclick = async () => {
@@ -172,7 +188,7 @@ document.getElementById("audioFile").onchange = (e) => {
     document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
 
-// --- 5. GLOBAL CONTROLS ---
+// --- 6. GLOBAL CONTROLS ---
 document.getElementById("toggleUpload").onclick = () => document.getElementById("uploadForm").classList.toggle("hidden");
 
 window.stopAll = () => {
