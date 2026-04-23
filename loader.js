@@ -16,14 +16,16 @@ const db = getFirestore(app);
 const rtdb = getDatabase(app);
 const audioCache = {}; 
 
-// --- 1. LIVE USER COUNTER (FIXED) ---
+// --- 1. LIVE USER COUNTER (THE FIX) ---
 const userCountElem = document.getElementById("userCount");
 if (userCountElem) {
     onValue(ref(rtdb, 'presence/'), (snap) => {
-        // We use Object.keys instead of numChildren() to avoid the "is not a function" error
-        const data = snap.val();
-        const count = data ? Object.keys(data).length : 1;
-        userCountElem.innerText = count;
+        let count = 0;
+        // Robust counting: forEach is guaranteed to work on RTDB snapshots
+        snap.forEach(() => {
+            count++;
+        });
+        userCountElem.innerText = count || 1;
     });
 
     const myPresenceRef = push(ref(rtdb, 'presence/'));
@@ -61,7 +63,7 @@ onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snaps
     
     snapshot.docChanges().forEach((change) => {
         if (change.type === "added") {
-            // Only render if it's not already on the screen
+            // Guard against duplicate rendering during slow loads
             if (!document.getElementById(`card-${change.doc.id}`)) {
                 renderSound(change.doc.id, change.doc.data());
             }
@@ -80,23 +82,31 @@ function renderSound(id, data) {
     
     btn.addEventListener("pointerdown", async (e) => {
         e.preventDefault();
-        // Load audio ONLY when the button is actually clicked (saves initial load time)
+        
+        // Lazy-loading audio only when clicked to keep initial page load fast
         if (!audioCache[id]) {
             card.classList.add("loading-audio");
-            audioCache[id] = new Audio(data.audioData);
-            audioCache[id].onended = () => card.classList.remove("playing");
-            audioCache[id].onpause = () => card.classList.remove("playing");
-            await sleep(50);
+            try {
+                audioCache[id] = new Audio(data.audioData);
+                audioCache[id].onended = () => card.classList.remove("playing");
+                audioCache[id].onpause = () => card.classList.remove("playing");
+                // Pre-warm the audio
+                audioCache[id].load();
+            } catch (err) {
+                console.error("Audio init error:", err);
+            }
             card.classList.remove("loading-audio");
         }
 
         const audio = audioCache[id];
-        if (!audio.paused) {
-            audio.pause();
-            audio.currentTime = 0;
-        } else {
-            window.stopAll(); 
-            audio.play().then(() => card.classList.add("playing")).catch(() => {});
+        if (audio) {
+            if (!audio.paused) {
+                audio.pause();
+                audio.currentTime = 0;
+            } else {
+                window.stopAll(); 
+                audio.play().then(() => card.classList.add("playing")).catch(() => {});
+            }
         }
     });
 
@@ -109,22 +119,22 @@ function renderSound(id, data) {
     soundGrid.appendChild(card);
 }
 
-// --- 4. BULK UPLOAD FIX ---
+// --- 4. BULK UPLOAD HANDLERS ---
 const bulkBtn = document.getElementById("bulkSyncBtn");
 const folderInput = document.getElementById("folderInput");
 
 if (bulkBtn && folderInput) {
-    bulkBtn.onclick = (e) => {
+    bulkBtn.addEventListener("click", (e) => {
         e.preventDefault();
         folderInput.click();
-    };
+    });
 }
 
 folderInput.onchange = async (e) => {
     const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
     if (files.length === 0) return;
 
-    if (files.length > 25 && !confirm(`Syncing ${files.length} sounds? Massive uploads can slow down the site.`)) {
+    if (files.length > 20 && !confirm(`Uploading ${files.length} sounds. The site may lag during sync. Continue?`)) {
         e.target.value = "";
         return;
     }
@@ -140,12 +150,12 @@ folderInput.onchange = async (e) => {
     e.target.value = ""; 
 };
 
-// --- 5. UPLOAD LOGIC ---
+// --- 5. UPLOAD CORE ---
 async function uploadToFirebase(file, customName = null) {
     const name = customName || cleanFileName(file.name);
-    // 700KB is the strict limit because Base64 encoding adds 33% size overhead
-    if (file.size > 700000) { 
-        console.warn(`${name} skipped: Too large for Firestore.`);
+    // Firestore max document size is 1MB. Base64 adds ~33% overhead.
+    if (file.size > 720000) { 
+        console.warn(`Skipped ${name}: File too large (Max 700KB)`);
         return false;
     }
 
@@ -157,20 +167,22 @@ async function uploadToFirebase(file, customName = null) {
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-        await sleep(700); // Wait to prevent Firebase from rate-limiting you
+        // Cooldown prevents the browser from freezing and Firestore from rate-limiting
+        await sleep(600); 
         return true;
     } catch (err) {
-        console.error("Upload failed:", err);
+        console.error("Upload error:", err);
         return false;
     }
 }
 
+// Single Upload Handler
 document.getElementById("submitUpload").onclick = async () => {
     const fileInput = document.getElementById("audioFile");
     const nameInput = document.getElementById("soundName");
     const btn = document.getElementById("submitUpload");
 
-    if (!fileInput.files[0]) return alert("Select an MP3.");
+    if (!fileInput.files[0]) return alert("Select an MP3 file first.");
 
     btn.disabled = true;
     btn.innerText = "Syncing...";
@@ -181,6 +193,7 @@ document.getElementById("submitUpload").onclick = async () => {
     if (success) {
         nameInput.value = "";
         fileInput.value = "";
+        document.getElementById("fileStatus").innerText = "Click to select MP3 (Max 700KB)";
         document.getElementById("uploadForm").classList.add("hidden");
     }
 };
@@ -194,15 +207,19 @@ document.getElementById("toggleUpload").onclick = () => document.getElementById(
 
 window.stopAll = () => {
     Object.values(audioCache).forEach(a => { 
-        a.pause(); 
-        a.currentTime = 0; 
+        if (a) {
+            a.pause(); 
+            a.currentTime = 0; 
+        }
     });
     document.querySelectorAll('.sound').forEach(s => s.classList.remove('playing'));
 };
 
 window.playAll = () => {
     Object.values(audioCache).forEach(a => {
-        a.currentTime = 0;
-        a.play().catch(() => {});
+        if (a) {
+            a.currentTime = 0;
+            a.play().catch(() => {});
+        }
     });
 };
