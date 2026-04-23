@@ -1,143 +1,99 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import { getFirestore, collection, getDocs, addDoc, query, orderBy, serverTimestamp, limit, startAfter } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { getDatabase, ref, onValue, set, onDisconnect, push } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
-// --- 1. FIREBASE SETUP ---
+// --- CONFIG (Your Original Credentials) ---
 const firebaseConfig = {
-    apiKey: "AIzaSyBa2orhKFThmsjBYcnIoM1iml2xNhOmjh8",
-    authDomain: "newsound-15fa5.firebaseapp.com",
-    projectId: "newsound-15fa5",
-    databaseURL: "https://newsound-15fa5-default-rtdb.firebaseio.com",
-    storageBucket: "newsound-15fa5.appspot.com",   // ← ADD THIS to your firebaseConfig
-    appId: "1:29777437103:web:f038577254c76c38168f5a"
+    apiKey: "AIzaSyB1XRR_Oi68prosRM6WUgcZA7hPzT-DmOk",
+    authDomain: "soundboard-ce3f9.firebaseapp.com",
+    projectId: "soundboard-ce3f9",
+    databaseURL: "https://soundboard-ce3f9-default-rtdb.firebaseio.com",
+    appId: "1:554974413045:web:1a1489c5dd8bc2723bc5bc"
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const rtdb = getDatabase(app);
-const storage = getStorage(app);
 
-// audioCache stores Audio objects keyed by doc ID — only created on first click
-const audioCache = {};
+// Global cache for loaded audio to prevent redundant memory usage
+const audioCache = {}; 
 
-// --- 2. LIVE USER COUNTER ---
+// --- 1. LIVE USER COUNTER (Optimized) ---
 const userCountElem = document.getElementById("userCount");
-if (userCountElem) {
-    onValue(ref(rtdb, 'presence/'), (snap) => {
-        const val = snap.val();
-        userCountElem.innerText = val ? Object.keys(val).length : 1;
-    });
+const presenceRef = ref(rtdb, 'presence/');
+const myPresenceRef = push(presenceRef);
 
-    const myPresenceRef = push(ref(rtdb, 'presence/'));
-    onValue(ref(rtdb, '.info/connected'), (snap) => {
-        if (snap.val() === true) {
-            set(myPresenceRef, { online: true });
-            onDisconnect(myPresenceRef).remove();
-        }
-    });
-}
-
-// --- 3. BATCH LOADING / INFINITE SCROLL ---
-const soundGrid = document.getElementById("soundGrid");
-let lastVisible = null;
-let isLoading = false;
-let allLoaded = false;
-const BATCH_SIZE = 20;
-
-// Sentinel triggers next page load when scrolled into view
-const sentinel = document.createElement("div");
-sentinel.id = "sentinel";
-sentinel.style.cssText = "height:20px;width:100%;";
-soundGrid.after(sentinel);
-
-async function loadBatch() {
-    if (isLoading || allLoaded) return;
-    isLoading = true;
-
-    try {
-        const q = lastVisible
-            ? query(collection(db, "sounds"), orderBy("createdAt", "desc"), startAfter(lastVisible), limit(BATCH_SIZE))
-            : query(collection(db, "sounds"), orderBy("createdAt", "desc"), limit(BATCH_SIZE));
-
-        const snap = await getDocs(q);
-
-        document.querySelector(".spinner")?.remove();
-
-        if (snap.empty) {
-            allLoaded = true;
-            sentinel.innerText = "No more sounds.";
-            observer.unobserve(sentinel); // Stop watching — nothing left to load
-            return;
-        }
-
-        lastVisible = snap.docs[snap.docs.length - 1];
-
-        // Build all cards in a DocumentFragment — one DOM write instead of many
-        const fragment = document.createDocumentFragment();
-        snap.forEach((doc) => {
-            if (!document.getElementById(`card-${doc.id}`)) {
-                fragment.appendChild(buildCard(doc.id, doc.data()));
-            }
-        });
-        soundGrid.appendChild(fragment);
-
-    } catch (err) {
-        console.error("Batch load error:", err);
-    } finally {
-        isLoading = false;
+onValue(ref(rtdb, '.info/connected'), (snap) => {
+    if (snap.val() === true) {
+        set(myPresenceRef, { online: true });
+        onDisconnect(myPresenceRef).remove();
     }
+});
+
+onValue(presenceRef, (snap) => {
+    // numChildren() is much more efficient than manual counting
+    userCountElem.innerText = snap.numChildren() || 1;
+});
+
+// --- 2. AI-STYLE NAME CLEANER ---
+function cleanFileName(rawName) {
+    let name = rawName.replace(".mp3", "");
+    name = name.replace(/(_[a-zA-Z0-9]{11}|tmp_\d+|copy|[\(\)\d])/gi, "");
+    name = name.replace(/[_\-\.]+/g, " ").trim();
+    
+    let words = name.split(" ").filter(w => w.length > 0)
+                    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+
+    return words.length > 6 ? words.slice(0, 6).join(" ") + "..." : words.join(" ") || "Unknown Sound";
 }
 
-const observer = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) loadBatch();
-}, { rootMargin: "200px" }); // Start loading 200px before user hits the bottom
+// --- 3. UI RENDERING (Incremental Loading) ---
+const soundGrid = document.getElementById("soundGrid");
 
-observer.observe(sentinel);
+// Using docChanges() prevents the entire grid from flickering/reloading
+onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
+    document.querySelector(".spinner")?.remove();
+    
+    snapshot.docChanges().forEach((change) => {
+        if (change.type === "added") {
+            renderSound(change.doc.id, change.doc.data());
+        }
+    });
+});
 
-// --- 4. SOUND CARD BUILDER ---
-// Separated from renderSound so we can batch into a fragment above.
-// Audio is NOT created here — only on first click.
-function buildCard(id, data) {
+function renderSound(id, data) {
     const card = document.createElement("div");
     card.className = "sound";
     card.id = `card-${id}`;
-
+    
     const btn = document.createElement("button");
     btn.className = "small-button";
     btn.style.backgroundColor = data.color || "#6366f1";
-
+    
+    // LAZY LOADING: We only create the Audio object when the user clicks
     btn.addEventListener("pointerdown", async (e) => {
         e.preventDefault();
 
-        // First click: create Audio from Storage URL (tiny metadata fetch, no full download yet)
         if (!audioCache[id]) {
-            card.classList.add("loading-audio");
-            try {
-                // data.url is just a short HTTPS string — loads instantly from Firestore
-                const audio = new Audio();
-                audio.preload = "none"; // Don't download until .play() is called
-                audio.src = data.url;
-                audio.onended = () => card.classList.remove("playing");
-                audio.onpause = () => card.classList.remove("playing");
-                audioCache[id] = audio;
-            } catch (err) {
-                console.error("Audio init error:", err);
-                card.classList.remove("loading-audio");
-                return;
-            }
-            card.classList.remove("loading-audio");
+            // Create audio only on first interaction
+            audioCache[id] = new Audio(data.audioData);
+            audioCache[id].addEventListener("ended", () => card.classList.remove("playing"));
+            audioCache[id].addEventListener("pause", () => card.classList.remove("playing"));
         }
 
         const audio = audioCache[id];
+
         if (!audio.paused) {
             audio.pause();
             audio.currentTime = 0;
         } else {
-            stopAll(); // Stop anything currently playing
-            audio.play()
-                .then(() => card.classList.add("playing"))
-                .catch((err) => console.warn("Playback error:", err));
+            window.stopAll(); 
+            try {
+                await audio.play();
+                card.classList.add("playing");
+            } catch (err) {
+                console.warn("Playback blocked by browser. Click the page first!");
+            }
         }
     });
 
@@ -147,107 +103,68 @@ function buildCard(id, data) {
 
     card.appendChild(btn);
     card.appendChild(name);
-    return card;
+    soundGrid.appendChild(card);
 }
 
-// --- 5. UTILITIES ---
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+// --- 4. BULK SYNC & UPLOAD ---
+const folderInput = document.getElementById("folderInput");
+const bulkSyncBtn = document.getElementById("bulkSyncBtn");
 
-function cleanFileName(rawName) {
-    let name = rawName
-        .replace(/\.mp3$/i, "")
-        .replace(/(_[a-zA-Z0-9]{11}|tmp_\d+|copy|[\(\)\d])/gi, "")
-        .replace(/[_\-\.]+/g, " ")
-        .trim();
-    const words = name.split(" ")
-        .filter(w => w.length > 0)
-        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
-    return words.length > 6
-        ? words.slice(0, 6).join(" ") + "..."
-        : words.join(" ") || "Unknown Sound";
-}
+bulkSyncBtn.onclick = () => folderInput.click();
 
-// --- 6. UPLOAD: Now uses Firebase Storage ---
-// Stores the file in Storage, saves a short URL in Firestore.
-// A 700KB MP3 stays as a 700KB binary — not inflated to 933KB of base64.
-async function uploadToFirebase(file, customName = null) {
-    if (file.size > 700_000) return false;
+folderInput.onchange = async (e) => {
+    const files = Array.from(e.target.files).filter(f => f.name.endsWith(".mp3"));
+    if (files.length === 0) return;
 
-    const name = customName || cleanFileName(file.name);
-    const fileRef = storageRef(storage, `sounds/${Date.now()}_${file.name}`);
+    bulkSyncBtn.disabled = true;
+    bulkSyncBtn.innerText = "Processing...";
 
-    try {
-        // Upload raw binary — much faster than base64 encoding + Firestore write
-        const snapshot = await uploadBytes(fileRef, file);
-        const url = await getDownloadURL(snapshot.ref);
+    const existingDocs = await getDocs(collection(db, "sounds"));
+    const existingNames = existingDocs.docs.map(d => d.data().name);
 
+    for (const file of files) {
+        const cleanedName = cleanFileName(file.name);
+        
+        // Safety: Base64 makes files ~33% larger. Firestore has a 1MB limit per document.
+        // We limit to 700KB to be safe.
+        if (existingNames.includes(cleanedName) || file.size > 700000) continue;
+
+        const base64 = await blobToBase64(file);
         await addDoc(collection(db, "sounds"), {
-            name,
-            url,   // ← Short URL string instead of full base64 blob
+            name: cleanedName,
+            audioData: base64,
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-
-        await sleep(300); // Brief pause between bulk uploads to avoid rate limits
-        return true;
-    } catch (err) {
-        console.error("Upload error:", err);
-        return false;
     }
-}
-
-// --- 7. UPLOAD UI HANDLERS ---
-const bulkBtn = document.getElementById("bulkSyncBtn");
-const folderInput = document.getElementById("folderInput");
-
-if (bulkBtn && folderInput) {
-    bulkBtn.onclick = () => folderInput.click();
-
-    folderInput.onchange = async (e) => {
-        const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
-        if (!files.length) return;
-
-        bulkBtn.disabled = true;
-        for (let i = 0; i < files.length; i++) {
-            bulkBtn.innerText = `Syncing ${i + 1}/${files.length}...`;
-            await uploadToFirebase(files[i]);
-        }
-        location.reload();
-    };
-}
-
-document.getElementById("submitUpload").onclick = async () => {
-    const fileInput = document.getElementById("audioFile");
-    const nameInput = document.getElementById("soundName");
-    const btn = document.getElementById("submitUpload");
-
-    if (!fileInput.files[0]) return alert("Select an MP3.");
-
-    btn.disabled = true;
-    btn.innerText = "Syncing...";
-    await uploadToFirebase(fileInput.files[0], nameInput.value.trim() || null);
-    location.reload();
+    
+    bulkSyncBtn.disabled = false;
+    bulkSyncBtn.innerText = "📁 Bulk Sync Folder";
 };
 
-document.getElementById("audioFile").onchange = (e) => {
-    document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
-};
-
-// --- 8. GLOBAL CONTROLS ---
-document.getElementById("toggleUpload").onclick = () =>
-    document.getElementById("uploadForm").classList.toggle("hidden");
-
-function stopAll() {
-    Object.values(audioCache).forEach(a => {
-        if (a && !a.paused) { a.pause(); a.currentTime = 0; }
+function blobToBase64(blob) {
+    return new Promise(r => {
+        const reader = new FileReader();
+        reader.onloadend = () => r(reader.result);
+        reader.readAsDataURL(blob);
     });
-    document.querySelectorAll(".sound.playing").forEach(s => s.classList.remove("playing"));
 }
 
-window.stopAll = stopAll;
+// --- 5. GLOBAL CONTROLS ---
+document.getElementById("toggleUpload").onclick = () => document.getElementById("uploadForm").classList.toggle("hidden");
+
+window.stopAll = () => {
+    Object.values(audioCache).forEach(a => {
+        a.pause();
+        a.currentTime = 0;
+    });
+    document.querySelectorAll('.sound').forEach(s => s.classList.remove('playing'));
+};
 
 window.playAll = () => {
+    // Note: This may fail in some browsers due to 'Autoplay' security policies
     Object.values(audioCache).forEach(a => {
-        if (a) { a.currentTime = 0; a.play().catch(() => {}); }
+        a.currentTime = 0;
+        a.play().catch(() => {});
     });
 };
