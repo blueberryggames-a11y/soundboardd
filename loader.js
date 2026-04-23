@@ -4,11 +4,11 @@ import { getDatabase, ref, onValue, set, onDisconnect, push } from "https://www.
 
 // --- CONFIG (Your Original Credentials) ---
 const firebaseConfig = {
-    apiKey: "AIzaSyB1XRR_Oi68prosRM6WUgcZA7hPzT-DmOk",
-    authDomain: "soundboard-ce3f9.firebaseapp.com",
-    projectId: "soundboard-ce3f9",
-    databaseURL: "https://soundboard-ce3f9-default-rtdb.firebaseio.com",
-    appId: "1:554974413045:web:1a1489c5dd8bc2723bc5bc"
+    apiKey: "AIzaSyBa2orhKFThmsjBYcnIoM1iml2xNhOmjh8",
+    authDomain: "newsound-15fa5.firebaseapp.com",
+    projectId: "newsound-15fa5",
+    databaseURL: "https://newsound-15fa5-default-rtdb.firebaseio.com",
+    appId: "1:29777437103:web:f038577254c76c38168f5a"
 };
 
 const app = initializeApp(firebaseConfig);
