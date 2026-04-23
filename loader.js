@@ -1,6 +1,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import { getFirestore, collection, getDocs, addDoc, query, orderBy, serverTimestamp, limit, startAfter } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { getDatabase, ref, onValue, set, onDisconnect, push } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
 // --- 1. FIREBASE SETUP ---
 const firebaseConfig = {
@@ -8,21 +9,24 @@ const firebaseConfig = {
     authDomain: "newsound-15fa5.firebaseapp.com",
     projectId: "newsound-15fa5",
     databaseURL: "https://newsound-15fa5-default-rtdb.firebaseio.com",
+    storageBucket: "newsound-15fa5.appspot.com",   // ← ADD THIS to your firebaseConfig
     appId: "1:29777437103:web:f038577254c76c38168f5a"
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const rtdb = getDatabase(app);
-const audioCache = {}; 
+const storage = getStorage(app);
 
-// --- 2. LIVE USER COUNTER (STABLE FIX) ---
+// audioCache stores Audio objects keyed by doc ID — only created on first click
+const audioCache = {};
+
+// --- 2. LIVE USER COUNTER ---
 const userCountElem = document.getElementById("userCount");
 if (userCountElem) {
     onValue(ref(rtdb, 'presence/'), (snap) => {
         const val = snap.val();
-        const count = val ? Object.keys(val).length : 1;
-        userCountElem.innerText = count;
+        userCountElem.innerText = val ? Object.keys(val).length : 1;
     });
 
     const myPresenceRef = push(ref(rtdb, 'presence/'));
@@ -36,47 +40,47 @@ if (userCountElem) {
 
 // --- 3. BATCH LOADING / INFINITE SCROLL ---
 const soundGrid = document.getElementById("soundGrid");
-let lastVisible = null; // Tracks the last sound fetched for pagination
-let isLoading = false;  // Prevents multiple simultaneous fetches
+let lastVisible = null;
+let isLoading = false;
+let allLoaded = false;
 const BATCH_SIZE = 20;
 
-// Create a "Sentinel" element at the bottom to detect scroll
+// Sentinel triggers next page load when scrolled into view
 const sentinel = document.createElement("div");
 sentinel.id = "sentinel";
-sentinel.style.height = "20px";
-sentinel.style.width = "100%";
+sentinel.style.cssText = "height:20px;width:100%;";
 soundGrid.after(sentinel);
 
 async function loadBatch() {
-    if (isLoading) return;
+    if (isLoading || allLoaded) return;
     isLoading = true;
 
     try {
-        let q;
-        if (lastVisible) {
-            q = query(collection(db, "sounds"), orderBy("createdAt", "desc"), startAfter(lastVisible), limit(BATCH_SIZE));
-        } else {
-            q = query(collection(db, "sounds"), orderBy("createdAt", "desc"), limit(BATCH_SIZE));
-        }
+        const q = lastVisible
+            ? query(collection(db, "sounds"), orderBy("createdAt", "desc"), startAfter(lastVisible), limit(BATCH_SIZE))
+            : query(collection(db, "sounds"), orderBy("createdAt", "desc"), limit(BATCH_SIZE));
 
-        const documentSnapshots = await getDocs(q);
-        
-        // Remove the spinner once the first batch arrives
+        const snap = await getDocs(q);
+
         document.querySelector(".spinner")?.remove();
 
-        if (documentSnapshots.empty) {
-            sentinel.innerText = "No more sounds to load.";
-            isLoading = false;
+        if (snap.empty) {
+            allLoaded = true;
+            sentinel.innerText = "No more sounds.";
+            observer.unobserve(sentinel); // Stop watching — nothing left to load
             return;
         }
 
-        lastVisible = documentSnapshots.docs[documentSnapshots.docs.length - 1];
+        lastVisible = snap.docs[snap.docs.length - 1];
 
-        documentSnapshots.forEach((doc) => {
+        // Build all cards in a DocumentFragment — one DOM write instead of many
+        const fragment = document.createDocumentFragment();
+        snap.forEach((doc) => {
             if (!document.getElementById(`card-${doc.id}`)) {
-                renderSound(doc.id, doc.data());
+                fragment.appendChild(buildCard(doc.id, doc.data()));
             }
         });
+        soundGrid.appendChild(fragment);
 
     } catch (err) {
         console.error("Batch load error:", err);
@@ -85,50 +89,55 @@ async function loadBatch() {
     }
 }
 
-// Intersection Observer: Triggers loadBatch when user reaches the bottom
 const observer = new IntersectionObserver((entries) => {
-    if (entries[0].isIntersecting) {
-        loadBatch();
-    }
-}, { threshold: 0.1 });
+    if (entries[0].isIntersecting) loadBatch();
+}, { rootMargin: "200px" }); // Start loading 200px before user hits the bottom
 
 observer.observe(sentinel);
 
-// --- 4. SOUND RENDERING ---
-function renderSound(id, data) {
+// --- 4. SOUND CARD BUILDER ---
+// Separated from renderSound so we can batch into a fragment above.
+// Audio is NOT created here — only on first click.
+function buildCard(id, data) {
     const card = document.createElement("div");
     card.className = "sound";
     card.id = `card-${id}`;
-    
+
     const btn = document.createElement("button");
     btn.className = "small-button";
     btn.style.backgroundColor = data.color || "#6366f1";
-    
+
     btn.addEventListener("pointerdown", async (e) => {
         e.preventDefault();
-        
-        // Audio data is stored in the DOM, but we only "create" the player on click
+
+        // First click: create Audio from Storage URL (tiny metadata fetch, no full download yet)
         if (!audioCache[id]) {
             card.classList.add("loading-audio");
             try {
-                audioCache[id] = new Audio(data.audioData);
-                audioCache[id].onended = () => card.classList.remove("playing");
-                audioCache[id].onpause = () => card.classList.remove("playing");
+                // data.url is just a short HTTPS string — loads instantly from Firestore
+                const audio = new Audio();
+                audio.preload = "none"; // Don't download until .play() is called
+                audio.src = data.url;
+                audio.onended = () => card.classList.remove("playing");
+                audio.onpause = () => card.classList.remove("playing");
+                audioCache[id] = audio;
             } catch (err) {
                 console.error("Audio init error:", err);
+                card.classList.remove("loading-audio");
+                return;
             }
             card.classList.remove("loading-audio");
         }
 
         const audio = audioCache[id];
-        if (audio) {
-            if (!audio.paused) {
-                audio.pause();
-                audio.currentTime = 0;
-            } else {
-                window.stopAll(); 
-                audio.play().then(() => card.classList.add("playing")).catch(() => {});
-            }
+        if (!audio.paused) {
+            audio.pause();
+            audio.currentTime = 0;
+        } else {
+            stopAll(); // Stop anything currently playing
+            audio.play()
+                .then(() => card.classList.add("playing"))
+                .catch((err) => console.warn("Playback error:", err));
         }
     });
 
@@ -138,41 +147,48 @@ function renderSound(id, data) {
 
     card.appendChild(btn);
     card.appendChild(name);
-    soundGrid.appendChild(card);
+    return card;
 }
 
 // --- 5. UTILITIES ---
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
 function cleanFileName(rawName) {
-    let name = rawName.replace(".mp3", "").replace(/(_[a-zA-Z0-9]{11}|tmp_\d+|copy|[\(\)\d])/gi, "");
-    name = name.replace(/[_\-\.]+/g, " ").trim();
-    let words = name.split(" ").filter(w => w.length > 0).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
-    return words.length > 6 ? words.slice(0, 6).join(" ") + "..." : words.join(" ") || "Unknown Sound";
+    let name = rawName
+        .replace(/\.mp3$/i, "")
+        .replace(/(_[a-zA-Z0-9]{11}|tmp_\d+|copy|[\(\)\d])/gi, "")
+        .replace(/[_\-\.]+/g, " ")
+        .trim();
+    const words = name.split(" ")
+        .filter(w => w.length > 0)
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+    return words.length > 6
+        ? words.slice(0, 6).join(" ") + "..."
+        : words.join(" ") || "Unknown Sound";
 }
 
-function blobToBase64(blob) {
-    return new Promise(res => {
-        const reader = new FileReader();
-        reader.onloadend = () => res(reader.result);
-        reader.readAsDataURL(blob);
-    });
-}
-
-// --- 6. UPLOAD HANDLERS ---
+// --- 6. UPLOAD: Now uses Firebase Storage ---
+// Stores the file in Storage, saves a short URL in Firestore.
+// A 700KB MP3 stays as a 700KB binary — not inflated to 933KB of base64.
 async function uploadToFirebase(file, customName = null) {
+    if (file.size > 700_000) return false;
+
     const name = customName || cleanFileName(file.name);
-    if (file.size > 700000) return false;
+    const fileRef = storageRef(storage, `sounds/${Date.now()}_${file.name}`);
 
     try {
-        const base64 = await blobToBase64(file);
+        // Upload raw binary — much faster than base64 encoding + Firestore write
+        const snapshot = await uploadBytes(fileRef, file);
+        const url = await getDownloadURL(snapshot.ref);
+
         await addDoc(collection(db, "sounds"), {
-            name: name,
-            audioData: base64,
+            name,
+            url,   // ← Short URL string instead of full base64 blob
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-        await sleep(650); 
+
+        await sleep(300); // Brief pause between bulk uploads to avoid rate limits
         return true;
     } catch (err) {
         console.error("Upload error:", err);
@@ -180,24 +196,25 @@ async function uploadToFirebase(file, customName = null) {
     }
 }
 
-// UI Trigger for Folder
+// --- 7. UPLOAD UI HANDLERS ---
 const bulkBtn = document.getElementById("bulkSyncBtn");
 const folderInput = document.getElementById("folderInput");
+
 if (bulkBtn && folderInput) {
     bulkBtn.onclick = () => folderInput.click();
-}
 
-folderInput.onchange = async (e) => {
-    const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
-    if (files.length === 0) return;
-    
-    bulkBtn.disabled = true;
-    for (let i = 0; i < files.length; i++) {
-        bulkBtn.innerText = `Syncing ${i + 1}/${files.length}...`;
-        await uploadToFirebase(files[i]);
-    }
-    location.reload(); // Refresh to show new sounds in paginated list
-};
+    folderInput.onchange = async (e) => {
+        const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
+        if (!files.length) return;
+
+        bulkBtn.disabled = true;
+        for (let i = 0; i < files.length; i++) {
+            bulkBtn.innerText = `Syncing ${i + 1}/${files.length}...`;
+            await uploadToFirebase(files[i]);
+        }
+        location.reload();
+    };
+}
 
 document.getElementById("submitUpload").onclick = async () => {
     const fileInput = document.getElementById("audioFile");
@@ -212,22 +229,25 @@ document.getElementById("submitUpload").onclick = async () => {
     location.reload();
 };
 
-// --- 7. GLOBAL CONTROLS ---
-document.getElementById("toggleUpload").onclick = () => document.getElementById("uploadForm").classList.toggle("hidden");
-
-window.stopAll = () => {
-    Object.values(audioCache).forEach(a => { 
-        if (a) { a.pause(); a.currentTime = 0; }
-    });
-    document.querySelectorAll('.sound').forEach(s => s.classList.remove('playing'));
+document.getElementById("audioFile").onchange = (e) => {
+    document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
+
+// --- 8. GLOBAL CONTROLS ---
+document.getElementById("toggleUpload").onclick = () =>
+    document.getElementById("uploadForm").classList.toggle("hidden");
+
+function stopAll() {
+    Object.values(audioCache).forEach(a => {
+        if (a && !a.paused) { a.pause(); a.currentTime = 0; }
+    });
+    document.querySelectorAll(".sound.playing").forEach(s => s.classList.remove("playing"));
+}
+
+window.stopAll = stopAll;
 
 window.playAll = () => {
     Object.values(audioCache).forEach(a => {
         if (a) { a.currentTime = 0; a.play().catch(() => {}); }
     });
-};
-
-document.getElementById("audioFile").onchange = (e) => {
-    document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
