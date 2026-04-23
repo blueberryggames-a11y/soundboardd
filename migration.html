@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sound Migration</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: monospace;
+    background: #0f0f0f;
+    color: #e0e0e0;
+    padding: 40px;
+    min-height: 100vh;
+  }
+  h1 { color: #6366f1; margin-bottom: 8px; font-size: 1.4rem; }
+  p.sub { color: #666; margin-bottom: 32px; font-size: 0.85rem; }
+  #startBtn {
+    background: #6366f1;
+    color: white;
+    border: none;
+    padding: 12px 28px;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-family: monospace;
+    cursor: pointer;
+    margin-bottom: 32px;
+    transition: opacity 0.2s;
+  }
+  #startBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #log {
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+    padding: 20px;
+    max-height: 60vh;
+    overflow-y: auto;
+    font-size: 0.82rem;
+    line-height: 1.7;
+  }
+  .ok   { color: #4ade80; }
+  .err  { color: #f87171; }
+  .skip { color: #facc15; }
+  .info { color: #94a3b8; }
+  .done { color: #6366f1; font-weight: bold; font-size: 1rem; margin-top: 8px; }
+  #progress {
+    margin-bottom: 16px;
+    font-size: 0.85rem;
+    color: #94a3b8;
+  }
+  .bar-wrap {
+    background: #1a1a1a;
+    border-radius: 99px;
+    height: 6px;
+    margin-bottom: 24px;
+    overflow: hidden;
+  }
+  #bar {
+    height: 100%;
+    width: 0%;
+    background: #6366f1;
+    border-radius: 99px;
+    transition: width 0.3s;
+  }
+</style>
+</head>
+<body>
+
+<h1>🔄 Base64 → Storage Migration</h1>
+<p class="sub">Reads every Firestore sound with base64 data, uploads it to Firebase Storage, saves the URL, and cleans up the old field. Run once.</p>
+
+<button id="startBtn">Start Migration</button>
+
+<div id="progress">Waiting to start...</div>
+<div class="bar-wrap"><div id="bar"></div></div>
+<div id="log"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import {
+    getFirestore, collection, getDocs, updateDoc, doc, deleteField
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import {
+    getStorage, ref as storageRef, uploadBytes, getDownloadURL
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
+
+// ── PASTE YOUR CONFIG HERE ──────────────────────────────────────────────────
+const firebaseConfig = {
+    apiKey: "AIzaSyBa2orhKFThmsjBYcnIoM1iml2xNhOmjh8",
+    authDomain: "newsound-15fa5.firebaseapp.com",
+    projectId: "newsound-15fa5",
+    databaseURL: "https://newsound-15fa5-default-rtdb.firebaseio.com",
+    storageBucket: "newsound-15fa5.appspot.com",  // ← make sure this is correct
+    appId: "1:29777437103:web:f038577254c76c38168f5a"
+};
+// ───────────────────────────────────────────────────────────────────────────
+
+const app  = initializeApp(firebaseConfig);
+const db   = getFirestore(app);
+const storage = getStorage(app);
+
+const logEl  = document.getElementById("log");
+const bar    = document.getElementById("bar");
+const progEl = document.getElementById("progress");
+
+function log(msg, type = "info") {
+    const line = document.createElement("div");
+    line.className = type;
+    line.textContent = msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setProgress(done, total) {
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    bar.style.width = pct + "%";
+    progEl.textContent = `${done} / ${total} processed (${pct}%)`;
+}
+
+// Converts a base64 data-URL string → Blob
+function base64ToBlob(base64String) {
+    const [header, data] = base64String.split(",");
+    const mime = header.match(/:(.*?);/)?.[1] || "audio/mpeg";
+    const binary = atob(data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function migrate() {
+    const btn = document.getElementById("startBtn");
+    btn.disabled = true;
+    log("Fetching all sounds from Firestore...", "info");
+
+    const snap = await getDocs(collection(db, "sounds"));
+    const all  = snap.docs;
+    const toMigrate = all.filter(d => d.data().audioData && !d.data().url);
+
+    log(`Found ${all.length} total sounds. ${toMigrate.length} need migration, ${all.length - toMigrate.length} already have a URL.`, "info");
+
+    if (toMigrate.length === 0) {
+        log("✅ Nothing to migrate! All sounds already use Storage URLs.", "done");
+        setProgress(0, 0);
+        progEl.textContent = "Already done — nothing to migrate.";
+        return;
+    }
+
+    let done = 0, failed = 0;
+    setProgress(0, toMigrate.length);
+
+    for (const docSnap of toMigrate) {
+        const data = docSnap.data();
+        const label = `"${data.name || docSnap.id}"`;
+
+        try {
+            // 1. Convert base64 → Blob
+            const blob = base64ToBlob(data.audioData);
+
+            // 2. Upload to Firebase Storage
+            const fileRef = storageRef(storage, `sounds/${docSnap.id}.mp3`);
+            const uploadSnap = await uploadBytes(fileRef, blob);
+
+            // 3. Get public download URL
+            const url = await getDownloadURL(uploadSnap.ref);
+
+            // 4. Update Firestore: add `url`, remove `audioData`
+            await updateDoc(doc(db, "sounds", docSnap.id), {
+                url,
+                audioData: deleteField()   // ← removes the giant base64 field
+            });
+
+            done++;
+            log(`✓ Migrated ${label}`, "ok");
+
+        } catch (err) {
+            failed++;
+            log(`✗ Failed ${label}: ${err.message}`, "err");
+        }
+
+        setProgress(done + failed, toMigrate.length);
+        await sleep(150); // Small delay to avoid hammering Storage
+    }
+
+    log("─".repeat(48), "info");
+    log(`Migration complete. ✓ ${done} succeeded   ✗ ${failed} failed`, "done");
+
+    if (failed === 0) {
+        log("All base64 data has been removed. Your app is now fully on Firebase Storage.", "done");
+    } else {
+        log(`${failed} sounds failed — scroll up to see which ones. You can run this page again to retry them.`, "err");
+    }
+}
+
+document.getElementById("startBtn").onclick = migrate;
+</script>
+</body>
+</html>
