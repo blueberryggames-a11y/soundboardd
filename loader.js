@@ -16,7 +16,7 @@ const db = getFirestore(app);
 const rtdb = getDatabase(app);
 const audioCache = {}; 
 
-// --- 1. LIVE USER COUNTER (Optimized) ---
+// --- 1. LIVE USER COUNTER ---
 const userCountElem = document.getElementById("userCount");
 onValue(ref(rtdb, 'presence/'), (snap) => {
     userCountElem.innerText = snap.numChildren() || 1;
@@ -48,7 +48,7 @@ function blobToBase64(blob) {
     });
 }
 
-// --- 3. UI RENDERING (Incremental & Lazy) ---
+// --- 3. UI RENDERING ---
 const soundGrid = document.getElementById("soundGrid");
 
 onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
@@ -69,14 +69,12 @@ function renderSound(id, data) {
     
     btn.addEventListener("pointerdown", async (e) => {
         e.preventDefault();
-        
-        // Lazy Initialize Audio
         if (!audioCache[id]) {
             card.classList.add("loading-audio");
             audioCache[id] = new Audio(data.audioData);
             audioCache[id].onended = () => card.classList.remove("playing");
             audioCache[id].onpause = () => card.classList.remove("playing");
-            await sleep(50); // Short delay to let the browser process the blob
+            await sleep(50);
             card.classList.remove("loading-audio");
         }
 
@@ -99,14 +97,18 @@ function renderSound(id, data) {
     soundGrid.appendChild(card);
 }
 
-// --- 4. RATE-LIMITED UPLOADS (Updated) ---
+// --- 4. UPLOAD LOGIC & FIXES ---
+
+// TRIGGER: This makes the visible button open the hidden folder input
+document.getElementById("bulkSyncBtn").onclick = () => {
+    document.getElementById("folderInput").click();
+};
+
 async function uploadToFirebase(file, customName = null) {
     const name = customName || cleanFileName(file.name);
-    
-    // Firestore max doc size is 1MB. Base64 adds ~33% overhead.
     if (file.size > 720000) {
-        console.warn(`[Skipped] ${name}: File size over 700KB limit.`);
-        return false; // Return failure status
+        console.warn(`[Skipped] ${name}: Over 700KB.`);
+        return false;
     }
 
     try {
@@ -117,91 +119,57 @@ async function uploadToFirebase(file, customName = null) {
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-        
-        // Cooldown prevents Firestore burst rate limiting and lets the browser clear memory
-        await sleep(500); 
-        return true; // Return success status
-
+        await sleep(500); // Anti-lag delay
+        return true;
     } catch (error) {
-        console.error(`[Error] Failed to upload ${name}:`, error);
-        return false; // Prevent the loop from breaking if one file fails
+        console.error(`Error uploading ${name}:`, error);
+        return false;
     }
 }
 
-// Bulk Sync Logic (Updated)
+// Bulk Sync Handler
 document.getElementById("folderInput").onchange = async (e) => {
-    const files = Array.from(e.target.files).filter(f => f.name.endsWith(".mp3") || f.type === "audio/mpeg");
+    const files = Array.from(e.target.files).filter(f => f.name.endsWith(".mp3"));
     const btn = document.getElementById("bulkSyncBtn");
     
-    if (files.length === 0) {
-        alert("No MP3 files found in the selected folder.");
-        return;
-    }
-
-    // Safety net for massive folders to prevent accidental browser crashes
-    if (files.length > 50 && !confirm(`You are about to sync ${files.length} sounds. This may take a few minutes. Proceed?`)) {
-        e.target.value = ""; // Reset input
-        return;
-    }
+    if (files.length === 0) return;
+    if (files.length > 50 && !confirm(`Sync ${files.length} sounds?`)) return;
 
     btn.disabled = true;
-    let successCount = 0;
-    let failCount = 0;
-
     for (let i = 0; i < files.length; i++) {
-        // Update UI to show exact progress
         btn.innerText = `Syncing ${i + 1}/${files.length}...`;
-        
-        // Await the upload and track successes/failures
-        const success = await uploadToFirebase(files[i]);
-        if (success) {
-            successCount++;
-        } else {
-            failCount++;
-        }
+        await uploadToFirebase(files[i]);
     }
 
-    // Reset UI
     btn.disabled = false;
     btn.innerText = "📁 Bulk Sync Folder";
-    e.target.value = ""; // Clear input so the user can re-select the same folder later if needed
-
-    // Notify user of the final result if there were errors
-    if (failCount > 0) {
-        alert(`Sync complete. \nSuccessfully uploaded: ${successCount}\nSkipped/Failed: ${failCount} (File too large or network error)`);
-    }
+    e.target.value = ""; 
 };
 
-// Single Upload Logic (Updated to handle boolean return)
+// Single Upload Handler
 document.getElementById("submitUpload").onclick = async () => {
     const fileInput = document.getElementById("audioFile");
     const nameInput = document.getElementById("soundName");
     const btn = document.getElementById("submitUpload");
 
-    if (!fileInput.files[0]) return alert("Please select an MP3 file.");
+    if (!fileInput.files[0]) return alert("Select an MP3.");
 
     btn.disabled = true;
     btn.innerText = "Syncing...";
-    
     const success = await uploadToFirebase(fileInput.files[0], nameInput.value.trim() || null);
     
     btn.disabled = false;
     btn.innerText = "Sync to Cloud";
-    
     if (success) {
         nameInput.value = "";
         fileInput.value = "";
         document.getElementById("fileStatus").innerText = "Click to select MP3 (Max 700KB)";
         document.getElementById("uploadForm").classList.add("hidden");
-    } else {
-        alert("Upload failed. The file may be over the 700KB limit.");
     }
 };
 
-// Update file selection text
 document.getElementById("audioFile").onchange = (e) => {
-    const fileName = e.target.files[0]?.name || "Click to select MP3 (Max 700KB)";
-    document.getElementById("fileStatus").innerText = fileName;
+    document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
 
 // --- 5. GLOBAL CONTROLS ---
