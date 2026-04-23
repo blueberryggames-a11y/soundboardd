@@ -16,11 +16,13 @@ const db = getFirestore(app);
 const rtdb = getDatabase(app);
 const audioCache = {}; 
 
-// --- 1. LIVE USER COUNTER ---
+// --- 1. LIVE USER COUNTER (FIXED) ---
 const userCountElem = document.getElementById("userCount");
 if (userCountElem) {
+    // The fix: use snap.size for the number of children in v9+ SDK
     onValue(ref(rtdb, 'presence/'), (snap) => {
-        userCountElem.innerText = snap.numChildren() || 1;
+        const count = snap.exists() ? Object.keys(snap.val()).length : 1;
+        userCountElem.innerText = count;
     });
 
     const myPresenceRef = push(ref(rtdb, 'presence/'));
@@ -53,13 +55,17 @@ function blobToBase64(blob) {
 // --- 3. UI RENDERING ---
 const soundGrid = document.getElementById("soundGrid");
 onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
-    document.querySelector(".spinner")?.remove();
+    const spinner = document.querySelector(".spinner");
+    if (spinner) spinner.remove();
+    
     snapshot.docChanges().forEach((change) => {
         if (change.type === "added") renderSound(change.doc.id, change.doc.data());
     });
 });
 
 function renderSound(id, data) {
+    if (document.getElementById(`card-${id}`)) return; // Prevent duplicates
+
     const card = document.createElement("div");
     card.className = "sound";
     card.id = `card-${id}`;
@@ -72,6 +78,7 @@ function renderSound(id, data) {
         e.preventDefault();
         if (!audioCache[id]) {
             card.classList.add("loading-audio");
+            // Optimization: Create audio object only when first clicked
             audioCache[id] = new Audio(data.audioData);
             audioCache[id].onended = () => card.classList.remove("playing");
             audioCache[id].onpause = () => card.classList.remove("playing");
@@ -97,52 +104,40 @@ function renderSound(id, data) {
     soundGrid.appendChild(card);
 }
 
-// --- 4. THE FIX: BULK UPLOAD TRIGGERING ---
-
+// --- 4. BULK UPLOAD TRIGGER ---
 const bulkBtn = document.getElementById("bulkSyncBtn");
 const folderInput = document.getElementById("folderInput");
 
-// 1. Force the hidden input to open when the button is clicked
 if (bulkBtn && folderInput) {
-    bulkBtn.addEventListener("click", (e) => {
-        e.preventDefault();
-        folderInput.click();
-    });
+    bulkBtn.addEventListener("click", () => folderInput.click());
 }
 
-// 2. Handle the file processing after folder selection
 folderInput.onchange = async (e) => {
     const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
-    
-    if (files.length === 0) {
-        alert("No MP3 files found in that folder.");
-        return;
-    }
+    if (files.length === 0) return;
 
-    if (files.length > 30 && !confirm(`Upload ${files.length} sounds? This may take a moment.`)) {
+    if (files.length > 20 && !confirm(`Syncing ${files.length} sounds will take a while. Continue?`)) {
         e.target.value = "";
         return;
     }
 
     bulkBtn.disabled = true;
-    let count = 0;
-
-    for (const file of files) {
-        count++;
-        bulkBtn.innerText = `Syncing ${count}/${files.length}...`;
-        await uploadToFirebase(file);
+    for (let i = 0; i < files.length; i++) {
+        bulkBtn.innerText = `Syncing ${i + 1}/${files.length}...`;
+        await uploadToFirebase(files[i]);
     }
 
     bulkBtn.disabled = false;
     bulkBtn.innerText = "📁 Bulk Sync Folder";
-    e.target.value = ""; // Reset so you can select the same folder again
+    e.target.value = "";
 };
 
 // --- 5. UPLOAD CORE ---
 async function uploadToFirebase(file, customName = null) {
     const name = customName || cleanFileName(file.name);
-    if (file.size > 750000) { // Slightly increased tolerance
-        console.warn(`[Skipped] ${name}: Over limit.`);
+    // Firestore max limit is 1MB total; Base64 bloats files by 33%
+    if (file.size > 700000) { 
+        console.error(`${name} is too large for Firestore.`);
         return false;
     }
 
@@ -154,15 +149,14 @@ async function uploadToFirebase(file, customName = null) {
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-        await sleep(600); // Increased delay for safety
+        await sleep(800); // Wait for Firestore to breathe
         return true;
     } catch (err) {
-        console.error("Upload error:", err);
+        console.error("Upload failed:", err);
         return false;
     }
 }
 
-// Single Upload Handler
 document.getElementById("submitUpload").onclick = async () => {
     const fileInput = document.getElementById("audioFile");
     const nameInput = document.getElementById("soundName");
@@ -179,20 +173,18 @@ document.getElementById("submitUpload").onclick = async () => {
     if (success) {
         nameInput.value = "";
         fileInput.value = "";
-        document.getElementById("fileStatus").innerText = "Click to select MP3 (Max 700KB)";
         document.getElementById("uploadForm").classList.add("hidden");
     }
-};
-
-document.getElementById("audioFile").onchange = (e) => {
-    document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
 
 // --- 6. GLOBAL CONTROLS ---
 document.getElementById("toggleUpload").onclick = () => document.getElementById("uploadForm").classList.toggle("hidden");
 
 window.stopAll = () => {
-    Object.values(audioCache).forEach(a => { a.pause(); a.currentTime = 0; });
+    Object.values(audioCache).forEach(a => { 
+        a.pause(); 
+        a.currentTime = 0; 
+    });
     document.querySelectorAll('.sound').forEach(s => s.classList.remove('playing'));
 };
 
@@ -201,4 +193,9 @@ window.playAll = () => {
         a.currentTime = 0;
         a.play().catch(() => {});
     });
+};
+
+// File status update
+document.getElementById("audioFile").onchange = (e) => {
+    document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
