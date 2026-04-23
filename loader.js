@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebas
 import { getFirestore, collection, onSnapshot, addDoc, query, orderBy, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { getDatabase, ref, onValue, set, onDisconnect, push } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
-// --- CONFIG ---
+// --- 1. FIREBASE SETUP ---
 const firebaseConfig = {
     apiKey: "AIzaSyBa2orhKFThmsjBYcnIoM1iml2xNhOmjh8",
     authDomain: "newsound-15fa5.firebaseapp.com",
@@ -16,28 +16,30 @@ const db = getFirestore(app);
 const rtdb = getDatabase(app);
 const audioCache = {}; 
 
-// --- 1. LIVE USER COUNTER (THE FIX) ---
+// --- 2. LIVE USER COUNTER (THE DEFINITIVE FIX) ---
 const userCountElem = document.getElementById("userCount");
 if (userCountElem) {
     onValue(ref(rtdb, 'presence/'), (snap) => {
-        let count = 0;
-        // Robust counting: forEach is guaranteed to work on RTDB snapshots
-        snap.forEach(() => {
-            count++;
-        });
-        userCountElem.innerText = count || 1;
+        // We avoid snap.numChildren() entirely to prevent the TypeError.
+        // We get the raw object and count the keys using standard JS.
+        const data = snap.val();
+        const count = data ? Object.keys(data).length : 0;
+        userCountElem.innerText = count > 0 ? count : 1;
+    }, (error) => {
+        console.error("Presence sync error:", error);
     });
 
+    // Mark current user as online
     const myPresenceRef = push(ref(rtdb, 'presence/'));
     onValue(ref(rtdb, '.info/connected'), (snap) => {
-        if (snap.val()) {
+        if (snap.val() === true) {
             set(myPresenceRef, { online: true });
             onDisconnect(myPresenceRef).remove();
         }
     });
 }
 
-// --- 2. UTILITIES ---
+// --- 3. UTILITIES ---
 const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
 function cleanFileName(rawName) {
@@ -48,22 +50,24 @@ function cleanFileName(rawName) {
 }
 
 function blobToBase64(blob) {
-    return new Promise(r => {
+    return new Promise(resolve => {
         const reader = new FileReader();
-        reader.onloadend = () => r(reader.result);
+        reader.onloadend = () => resolve(reader.result);
         reader.readAsDataURL(blob);
     });
 }
 
-// --- 3. UI RENDERING (Optimized for speed) ---
+// --- 4. UI & SOUNDBOARD LOGIC ---
 const soundGrid = document.getElementById("soundGrid");
+
 onSnapshot(query(collection(db, "sounds"), orderBy("createdAt", "desc")), (snapshot) => {
+    // Remove spinner on first load
     const spinner = document.querySelector(".spinner");
     if (spinner) spinner.remove();
     
     snapshot.docChanges().forEach((change) => {
         if (change.type === "added") {
-            // Guard against duplicate rendering during slow loads
+            // Check to see if we already rendered this to prevent UI glitching
             if (!document.getElementById(`card-${change.doc.id}`)) {
                 renderSound(change.doc.id, change.doc.data());
             }
@@ -83,17 +87,15 @@ function renderSound(id, data) {
     btn.addEventListener("pointerdown", async (e) => {
         e.preventDefault();
         
-        // Lazy-loading audio only when clicked to keep initial page load fast
+        // Lazy-load the audio data only when clicked to keep page speed high
         if (!audioCache[id]) {
             card.classList.add("loading-audio");
             try {
                 audioCache[id] = new Audio(data.audioData);
                 audioCache[id].onended = () => card.classList.remove("playing");
                 audioCache[id].onpause = () => card.classList.remove("playing");
-                // Pre-warm the audio
-                audioCache[id].load();
             } catch (err) {
-                console.error("Audio init error:", err);
+                console.error("Audio playback error:", err);
             }
             card.classList.remove("loading-audio");
         }
@@ -119,14 +121,14 @@ function renderSound(id, data) {
     soundGrid.appendChild(card);
 }
 
-// --- 4. BULK UPLOAD HANDLERS ---
+// --- 5. BULK UPLOAD TRIGGER ---
 const bulkBtn = document.getElementById("bulkSyncBtn");
 const folderInput = document.getElementById("folderInput");
 
 if (bulkBtn && folderInput) {
     bulkBtn.addEventListener("click", (e) => {
         e.preventDefault();
-        folderInput.click();
+        folderInput.click(); // This manually triggers the hidden input
     });
 }
 
@@ -134,7 +136,7 @@ folderInput.onchange = async (e) => {
     const files = Array.from(e.target.files).filter(f => f.name.toLowerCase().endsWith(".mp3"));
     if (files.length === 0) return;
 
-    if (files.length > 20 && !confirm(`Uploading ${files.length} sounds. The site may lag during sync. Continue?`)) {
+    if (files.length > 20 && !confirm(`Syncing ${files.length} sounds. This might take a minute. Continue?`)) {
         e.target.value = "";
         return;
     }
@@ -150,12 +152,14 @@ folderInput.onchange = async (e) => {
     e.target.value = ""; 
 };
 
-// --- 5. UPLOAD CORE ---
+// --- 6. UPLOAD CORE ---
 async function uploadToFirebase(file, customName = null) {
     const name = customName || cleanFileName(file.name);
-    // Firestore max document size is 1MB. Base64 adds ~33% overhead.
-    if (file.size > 720000) { 
-        console.warn(`Skipped ${name}: File too large (Max 700KB)`);
+    
+    // Firestore Documents have a 1MB limit. Base64 strings are 33% larger than raw files.
+    // 700KB is the safest ceiling to avoid "Document too large" errors.
+    if (file.size > 700000) { 
+        console.warn(`[Skipped] ${name}: File exceeds 700KB limit.`);
         return false;
     }
 
@@ -167,22 +171,22 @@ async function uploadToFirebase(file, customName = null) {
             color: `hsl(${Math.random() * 360}, 70%, 60%)`,
             createdAt: serverTimestamp()
         });
-        // Cooldown prevents the browser from freezing and Firestore from rate-limiting
-        await sleep(600); 
+        // Cooldown prevents Firestore from rate-limiting your burst uploads
+        await sleep(650); 
         return true;
     } catch (err) {
-        console.error("Upload error:", err);
+        console.error("Upload failure:", err);
         return false;
     }
 }
 
-// Single Upload Handler
+// Single Upload UI logic
 document.getElementById("submitUpload").onclick = async () => {
     const fileInput = document.getElementById("audioFile");
     const nameInput = document.getElementById("soundName");
     const btn = document.getElementById("submitUpload");
 
-    if (!fileInput.files[0]) return alert("Select an MP3 file first.");
+    if (!fileInput.files[0]) return alert("Please select an MP3 file.");
 
     btn.disabled = true;
     btn.innerText = "Syncing...";
@@ -193,7 +197,6 @@ document.getElementById("submitUpload").onclick = async () => {
     if (success) {
         nameInput.value = "";
         fileInput.value = "";
-        document.getElementById("fileStatus").innerText = "Click to select MP3 (Max 700KB)";
         document.getElementById("uploadForm").classList.add("hidden");
     }
 };
@@ -202,24 +205,18 @@ document.getElementById("audioFile").onchange = (e) => {
     document.getElementById("fileStatus").innerText = e.target.files[0]?.name || "Select MP3";
 };
 
-// --- 6. GLOBAL CONTROLS ---
+// --- 7. GLOBAL CONTROLS ---
 document.getElementById("toggleUpload").onclick = () => document.getElementById("uploadForm").classList.toggle("hidden");
 
 window.stopAll = () => {
     Object.values(audioCache).forEach(a => { 
-        if (a) {
-            a.pause(); 
-            a.currentTime = 0; 
-        }
+        if (a) { a.pause(); a.currentTime = 0; }
     });
     document.querySelectorAll('.sound').forEach(s => s.classList.remove('playing'));
 };
 
 window.playAll = () => {
     Object.values(audioCache).forEach(a => {
-        if (a) {
-            a.currentTime = 0;
-            a.play().catch(() => {});
-        }
+        if (a) { a.currentTime = 0; a.play().catch(() => {}); }
     });
 };
